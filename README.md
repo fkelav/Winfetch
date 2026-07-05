@@ -4,6 +4,9 @@ A neofetch-style system info tool for Windows terminals. Prints colored ASCII ar
 
 No dependencies — just Python's standard library.
 
+<img width="1027" height="264" alt="image" src="https://github.com/user-attachments/assets/14d7df1b-a25f-4d31-9b99-408dd20e8752" />
+
+
 ## Install
 
 ```powershell
