@@ -12,6 +12,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import timedelta
 from html.parser import HTMLParser
@@ -21,8 +24,11 @@ from contextlib import suppress
 from . import __version__
 
 
+GITHUB_RAW_VERSION_URL = "https://raw.githubusercontent.com/fkelav/Winfetch/main/src/winfetch/__init__.py"
+GITHUB_ZIP_URL = "https://github.com/fkelav/Winfetch/archive/refs/heads/main.zip"
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 STYLE_COLOR_RE = re.compile(r"(?:^|;)\s*color\s*:\s*([^;]+)", re.IGNORECASE)
+VERSION_RE = re.compile(r"^\s*__version__\s*=\s*[\"']([^\"']+)[\"']\s*$", re.MULTILINE)
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -167,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Use a named config, save one with: --cfg save NAME, or delete one with: --cfg delete NAME.",
     )
     parser.add_argument("--config", action="store_true", help="Print config file paths and exit.")
+    parser.add_argument("--update", action="store_true", help="Check GitHub for a newer version and install it after confirmation.")
     parser.add_argument("--no-color", action="store_true", help="Disable all terminal colors.")
     parser.add_argument("--version", action="version", version=f"winfetch {__version__}")
     args = parser.parse_args(argv)
@@ -180,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.config:
         print_config_info()
         return 0
+
+    if args.update:
+        return update_from_github()
 
     if args.cfgs:
         print_named_configs(config)
@@ -221,6 +231,110 @@ def main(argv: list[str] | None = None) -> int:
 
     print(render(art.lines, stats, color=color))
     return 0
+
+
+def update_from_github() -> int:
+    """Offer to replace a normal-installer package with the current GitHub copy."""
+    try:
+        latest_version = github_version()
+        comparison = compare_versions(__version__, latest_version)
+    except OSError as exc:
+        print(f"Could not check GitHub for updates: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Installed version: {__version__}")
+    print(f"GitHub version:    {latest_version}")
+    if comparison >= 0:
+        print("You already have the latest version." if comparison == 0 else "Your installed version is newer than GitHub.")
+        return 0
+
+    try:
+        answer = input(f"Update winfetch to {latest_version}? [y/N]: ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in {"y", "yes"}:
+        print("Update cancelled.")
+        return 0
+
+    try:
+        update_installed_package()
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        print(f"Update failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Updated winfetch to {latest_version}.")
+    return 0
+
+
+def github_version() -> str:
+    request = urllib.request.Request(GITHUB_RAW_VERSION_URL, headers={"User-Agent": "winfetch"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        source = response.read().decode("utf-8", errors="replace")
+    match = VERSION_RE.search(source)
+    if match is None:
+        raise OSError("GitHub did not provide a valid winfetch version")
+    return match.group(1)
+
+
+def compare_versions(installed: str, latest: str) -> int:
+    """Compare numeric dotted versions without adding a packaging dependency."""
+    def normalized(value: str) -> tuple[int, ...]:
+        if not re.fullmatch(r"\d+(?:\.\d+)*", value):
+            raise OSError(f"Unsupported version format: {value}")
+        return tuple(int(part) for part in value.split("."))
+
+    left, right = normalized(installed), normalized(latest)
+    width = max(len(left), len(right))
+    return (left + (0,) * (width - len(left)) > right + (0,) * (width - len(right))) - (
+        left + (0,) * (width - len(left)) < right + (0,) * (width - len(right))
+    )
+
+
+def update_installed_package() -> None:
+    """Download main and atomically replace the package used by the Windows installer."""
+    package_dir = Path(__file__).resolve().parent
+    install_dir = package_dir.parent
+    expected_install_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Programs" / "winfetch"
+    if install_dir != expected_install_dir or package_dir.name != "winfetch":
+        raise OSError("--update is available only for the normal Windows installer; run the latest installer instead")
+
+    temp_root = Path(tempfile.mkdtemp(prefix="winfetch-update-"))
+    try:
+        archive_path = temp_root / "winfetch-main.zip"
+        request = urllib.request.Request(GITHUB_ZIP_URL, headers={"User-Agent": "winfetch"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            archive_path.write_bytes(response.read())
+        extract_dir = temp_root / "repo"
+        with zipfile.ZipFile(archive_path) as archive:
+            safe_extract(archive, extract_dir)
+        matches = list(extract_dir.glob("*/src/winfetch"))
+        if len(matches) != 1:
+            raise OSError("Downloaded update did not contain src/winfetch")
+
+        staging_dir = install_dir / ".winfetch-update"
+        backup_dir = install_dir / ".winfetch-previous"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        shutil.copytree(matches[0], staging_dir)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        package_dir.replace(backup_dir)
+        try:
+            staging_dir.replace(package_dir)
+        except OSError:
+            backup_dir.replace(package_dir)
+            raise
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if not target.is_relative_to(destination):
+            raise ValueError(f"Unsafe path in downloaded archive: {member.filename}")
+    archive.extractall(destination)
 
 
 def app_dir() -> Path:

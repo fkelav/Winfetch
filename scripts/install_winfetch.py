@@ -7,16 +7,47 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+import re
 
 
 APP_NAME = "winfetch"
 GITHUB_ZIP_URL = "https://github.com/fkelav/Winfetch/archive/refs/heads/main.zip"
+GITHUB_RAW_VERSION_URL = "https://raw.githubusercontent.com/fkelav/Winfetch/main/src/winfetch/__init__.py"
+VERSION_RE = re.compile(r"^\s*__version__\s*=\s*[\"']([^\"']+)[\"']\s*$", re.MULTILINE)
 
 
 def main() -> int:
+    installed_version = current_installed_version()
+    installer_version = bundled_version()
+    if installer_version is None:
+        print("Installer does not contain a valid winfetch version.", file=sys.stderr)
+        wait_before_exit()
+        return 1
+
+    print(f"Installed version: {installed_version or 'not installed'}")
+    print(f"Installer version: {installer_version}")
+    try:
+        latest_version = github_version()
+    except OSError as exc:
+        latest_version = None
+        print(f"GitHub version:    unavailable ({exc})")
+    else:
+        print(f"GitHub version:    {latest_version}")
+
+    source = choose_install_source(installed_version, installer_version, latest_version)
+    if source is None:
+        print("Installation cancelled.")
+        wait_before_exit()
+        return 0
+
     temp_root: Path | None = None
     try:
-        source_dir, temp_root = resolve_source_dir()
+        if source == "github":
+            source_dir, temp_root = download_latest_source()
+        else:
+            source_dir = bundled_source_dir()
+            if not source_dir.is_dir():
+                raise FileNotFoundError(f"Could not find bundled package source: {source_dir}")
         install(source_dir)
     except Exception as exc:
         print(f"Install failed: {exc}", file=sys.stderr)
@@ -25,25 +56,87 @@ def main() -> int:
     finally:
         if temp_root is not None:
             shutil.rmtree(temp_root, ignore_errors=True)
-
     print()
     print("Done. Open a new terminal to try it out.")
     wait_before_exit()
     return 0
 
 
-def resolve_source_dir() -> tuple[Path, Path | None]:
+def current_installed_version() -> str | None:
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    version_file = local_appdata / "Programs" / APP_NAME / APP_NAME / "__init__.py"
     try:
-        source_dir, temp_root = download_latest_source()
-        print("Installed latest winfetch from GitHub.")
-        return source_dir, temp_root
-    except Exception as exc:
-        print(f"Could not download latest winfetch from GitHub: {exc}")
-        print("Installing the bundled winfetch copy instead.")
-        source_dir = bundled_source_dir()
-        if not source_dir.is_dir():
-            raise FileNotFoundError(f"Could not find bundled package source: {source_dir}")
-        return source_dir, None
+        source = version_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = VERSION_RE.search(source)
+    return match.group(1) if match is not None else None
+
+
+def bundled_version() -> str | None:
+    try:
+        source = (bundled_source_dir() / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = VERSION_RE.search(source)
+    return match.group(1) if match is not None else None
+
+
+def github_version() -> str:
+    request = urllib.request.Request(GITHUB_RAW_VERSION_URL, headers={"User-Agent": "winfetch-installer"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            source = response.read().decode("utf-8", errors="replace")
+    except OSError:
+        raise
+    match = VERSION_RE.search(source)
+    if match is None:
+        raise OSError("GitHub did not provide a valid winfetch version")
+    return match.group(1)
+
+
+def compare_versions(installed: str, latest: str) -> int:
+    def normalized(value: str) -> tuple[int, ...]:
+        if not re.fullmatch(r"\d+(?:\.\d+)*", value):
+            raise OSError(f"Unsupported version format: {value}")
+        return tuple(int(part) for part in value.split("."))
+
+    left, right = normalized(installed), normalized(latest)
+    width = max(len(left), len(right))
+    left += (0,) * (width - len(left))
+    right += (0,) * (width - len(right))
+    return (left > right) - (left < right)
+
+
+def choose_install_source(
+    installed_version: str | None, installer_version: str, github_latest_version: str | None
+) -> str | None:
+    """Let the user explicitly choose the GitHub or bundled installer copy."""
+    if installed_version is not None:
+        try:
+            comparison = compare_versions(installed_version, github_latest_version or installer_version)
+        except OSError:
+            print("Could not compare the installed version with the available versions.")
+        else:
+            if comparison > 0:
+                print("Your installed version is newer than the newest available version.")
+            elif comparison == 0:
+                print("Your installed version matches the newest available version.")
+
+    print("\nChoose the version to install:")
+    if github_latest_version is not None:
+        print(f"  [g] GitHub version {github_latest_version}")
+    print(f"  [i] This installer version {installer_version}")
+    print("  [n] Cancel")
+    try:
+        answer = input("Choice: ").strip().lower()
+    except EOFError:
+        return None
+    if answer in {"i", "installer"}:
+        return "installer"
+    if github_latest_version is not None and answer in {"g", "github"}:
+        return "github"
+    return None
 
 
 def download_latest_source() -> tuple[Path, Path]:

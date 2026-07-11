@@ -15,7 +15,7 @@ winfetch
 
 ## One-file Windows installer
 
-For a normal user install, use `dist\install-winfetch.exe`. The EXE downloads the latest `src\winfetch` from GitHub, installs it, and creates the global `winfetch` command. If GitHub is unavailable, it installs the bundled copy inside the EXE instead.
+For a normal user install, use the versioned installer in `dist\`. It shows the installed version (if present), the version bundled into the installer, and the current GitHub version. You then choose whether to install the GitHub copy or the bundled installer copy; if GitHub cannot be reached, the bundled copy remains available. Use `winfetch --update` to check GitHub for a newer release.
 
 When it runs, it copies the app into `%LOCALAPPDATA%\Programs\winfetch` and creates `%LOCALAPPDATA%\Microsoft\WindowsApps\winfetch.cmd`. After it says `Done. Open a new terminal to try it out.`, open a new PowerShell or CMD window and run:
 
@@ -34,6 +34,7 @@ winfetch --cfgs                 # list saved named configs
 winfetch --cfg save work        # save the current settings as "work"
 winfetch --cfg work             # use a saved named config for this run
 winfetch --config               # show config file locations
+winfetch --update               # check GitHub and interactively install a newer version
 winfetch --no-color             # disable colors
 ```
 
@@ -52,13 +53,13 @@ py -m unittest
 
 ## Build installer exe
 
-With PyInstaller installed, build the self-updating one-file installer executable:
+With PyInstaller installed, build the versioned one-file installer executable:
 
 ```powershell
-py -m PyInstaller --onefile --name install-winfetch --add-data "src\winfetch;winfetch" scripts\install_winfetch.py
+py -m PyInstaller --onefile --name install-winfetch-1.1 --add-data "src\winfetch;src\winfetch" scripts\install_winfetch.py
 ```
 
-The executable will be at `dist\install-winfetch.exe`.
+The executable will be at `dist\install-winfetch-1.1.exe`.
 
 ## Licence
 MIT

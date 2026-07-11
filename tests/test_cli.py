@@ -42,6 +42,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["--cfg", "work", "--color", "red", "--no-color"]), 0)
         save_settings.assert_not_called()
 
+    def test_update_reports_current_version_without_prompting(self):
+        with patch("winfetch.cli.github_version", return_value="1.1"), patch("builtins.input") as prompt, patch(
+            "sys.stdout", new_callable=StringIO
+        ) as stdout:
+            self.assertEqual(cli.main(["--update"]), 0)
+        self.assertIn("latest version", stdout.getvalue())
+        prompt.assert_not_called()
+
+    def test_update_downloads_only_after_confirmation(self):
+        with patch("winfetch.cli.github_version", return_value="1.2"), patch(
+            "builtins.input", return_value="y"
+        ), patch("winfetch.cli.update_installed_package") as update, patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cli.main(["--update"]), 0)
+        update.assert_called_once_with()
+        self.assertIn("Updated winfetch to 1.2", stdout.getvalue())
+
+    def test_update_cancels_when_not_confirmed(self):
+        with patch("winfetch.cli.github_version", return_value="1.2"), patch(
+            "builtins.input", return_value="n"
+        ), patch("winfetch.cli.update_installed_package") as update, patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cli.main(["--update"]), 0)
+        update.assert_not_called()
+        self.assertIn("Update cancelled", stdout.getvalue())
+
+    def test_compare_versions_normalizes_missing_components(self):
+        self.assertEqual(cli.compare_versions("1.2", "1.2.0"), 0)
+        self.assertLess(cli.compare_versions("1.2.0", "1.10.0"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
