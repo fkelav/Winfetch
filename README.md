@@ -28,12 +28,16 @@ winfetch
 ```powershell
 winfetch                        # run with default art
 winfetch --ascii path\to\art    # use custom .ansi, .html, or .htm art
-winfetch --color 1-16           # set info label color
+winfetch --color1 1-16          # set info label color
+winfetch --color2 1-16          # set info value color
+winfetch --cfgs                 # list saved named configs
+winfetch --cfg save work        # save the current settings as "work"
+winfetch --cfg work             # use a saved named config for this run
+winfetch --config               # show config file locations
 winfetch --no-color             # disable colors
-winfetch --config               # show config file paths
 ```
 
-Custom art and label color are saved automatically for next time.
+Custom art, label color, and value color are saved automatically for next time.
 
 ## Config
 

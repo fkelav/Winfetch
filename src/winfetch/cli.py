@@ -52,6 +52,29 @@ PALETTE: tuple[tuple[int, int, int], ...] = (
     (255, 255, 255),
 )
 
+COLOR_NAMES = {
+    "black": 1,
+    "red": 2,
+    "green": 3,
+    "yellow": 4,
+    "blue": 5,
+    "magenta": 6,
+    "pink": 6,
+    "cyan": 7,
+    "white": 8,
+    "gray": 9,
+    "grey": 9,
+    "light black": 9,
+    "light red": 10,
+    "light green": 11,
+    "light yellow": 12,
+    "light blue": 13,
+    "light magenta": 14,
+    "light pink": 14,
+    "light cyan": 15,
+    "light white": 16,
+}
+
 
 @dataclass
 class Art:
@@ -123,21 +146,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ascii", dest="ascii_path", help="Path to a .ansi or .html ASCII art file and save it as the default.")
     parser.add_argument(
         "--color",
+        "--color1",
         dest="info_color",
-        type=int,
-        choices=range(1, len(PALETTE) + 1),
-        metavar="1-16",
-        help="Set the info label color by palette number.",
+        nargs="+",
+        metavar="COLOR",
+        help='Set the info label color by palette number or name, like "black" or "light red".',
     )
     parser.add_argument(
-        "--collor",
-        dest="info_color",
-        type=int,
-        choices=range(1, len(PALETTE) + 1),
-        metavar="1-16",
-        help=argparse.SUPPRESS,
+        "--color2",
+        dest="data_color",
+        nargs="+",
+        metavar="COLOR",
+        help='Set the info value color by palette number or name, like "white" or "light cyan".',
     )
-    parser.add_argument("--config", action="store_true", help="Print config paths and exit.")
+    parser.add_argument("--cfgs", action="store_true", help="Show the list of named configs and exit.")
+    parser.add_argument(
+        "--cfg",
+        nargs="+",
+        metavar="NAME",
+        help="Use a named config, save one with: --cfg save NAME, or delete one with: --cfg delete NAME.",
+    )
+    parser.add_argument("--config", action="store_true", help="Print config file paths and exit.")
     parser.add_argument("--no-color", action="store_true", help="Disable all terminal colors.")
     parser.add_argument("--version", action="version", version=f"winfetch {__version__}")
     args = parser.parse_args(argv)
@@ -145,21 +174,50 @@ def main(argv: list[str] | None = None) -> int:
     enable_windows_ansi()
     color = not args.no_color
 
+    config = load_config()
+    active_config = dict(config)
+
     if args.config:
         print_config_info()
         return 0
 
-    config = load_config()
+    if args.cfgs:
+        print_named_configs(config)
+        return 0
+
+    cfg_name = selected_cfg_name(args.cfg)
+    if cfg_name is not None:
+        named_config = get_named_config(config, cfg_name)
+        if named_config is None:
+            print(f"Config not found: {cfg_name}", file=sys.stderr)
+            return 1
+        active_config.update(named_config)
+
+    cfg_delete_name = cfg_delete_target(args.cfg)
+    if cfg_delete_name is not None:
+        return delete_named_config(config, cfg_delete_name)
+
     selected_art_path = Path(args.ascii_path).expanduser() if args.ascii_path else None
-    art_path = selected_art_path or configured_art_path(config)
-    info_color = args.info_color if args.info_color is not None else configured_info_color(config)
+    art_path = selected_art_path or configured_art_path(active_config)
+    selected_info_color = parse_palette_color(args.info_color, "--color") if args.info_color is not None else None
+    selected_data_color = parse_palette_color(args.data_color, "--color2") if args.data_color is not None else None
+    info_color = selected_info_color if selected_info_color is not None else configured_info_color(active_config)
+    data_color = selected_data_color if selected_data_color is not None else configured_data_color(active_config)
+
+    cfg_save_name = cfg_save_target(args.cfg)
+    if cfg_save_name is not None:
+        save_named_config(config, cfg_save_name, art_path, info_color, data_color)
+        print(f"Saved config: {cfg_save_name}")
+
     art = load_art(art_path, color=color)
-    stats = collect_stats(color=color, info_color=info_color)
+    stats = collect_stats(color=color, info_color=info_color, data_color=data_color)
 
     if art.warning:
         print(colorize(f"warning: {art.warning}", RED, color), file=sys.stderr)
-    if not art.warning and (selected_art_path is not None or args.info_color is not None):
-        save_settings(ascii_path=selected_art_path, info_color=args.info_color)
+    if cfg_name is None and not art.warning and (
+        selected_art_path is not None or selected_info_color is not None or selected_data_color is not None
+    ):
+        save_settings(ascii_path=selected_art_path, info_color=selected_info_color, data_color=selected_data_color)
 
     print(render(art.lines, stats, color=color))
     return 0
@@ -203,7 +261,11 @@ def save_config(config: dict[str, object]) -> None:
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
-def save_settings(ascii_path: Path | None = None, info_color: int | None = None) -> None:
+def save_settings(
+    ascii_path: Path | None = None,
+    info_color: int | None = None,
+    data_color: int | None = None,
+) -> None:
     config = load_config()
     if ascii_path is not None:
         try:
@@ -212,7 +274,98 @@ def save_settings(ascii_path: Path | None = None, info_color: int | None = None)
             config["ascii"] = str(ascii_path)
     if info_color is not None:
         config["info_color"] = info_color
+    if data_color is not None:
+        config["data_color"] = data_color
     save_config(config)
+
+
+def configs_dict(config: dict[str, object]) -> dict[str, object]:
+    configs = config.get("configs")
+    return configs if isinstance(configs, dict) else {}
+
+
+def print_named_configs(config: dict[str, object]) -> None:
+    names = sorted(name for name in configs_dict(config) if isinstance(name, str))
+    if not names:
+        print("No named configs saved.")
+        return
+    for name in names:
+        print(name)
+
+
+def selected_cfg_name(values: list[str] | None) -> str | None:
+    if not values or values[0].lower() in {"delete", "save"}:
+        return None
+    if len(values) != 1:
+        raise SystemExit("--cfg expects a single config name, --cfg save NAME, or --cfg delete NAME")
+    name = values[0].strip()
+    if not name:
+        raise SystemExit("--cfg expects a non-empty config name")
+    return name
+
+
+def cfg_save_target(values: list[str] | None) -> str | None:
+    if not values or values[0].lower() != "save":
+        return None
+    if len(values) != 2:
+        raise SystemExit("--cfg save expects a config name")
+    return values[1].strip()
+
+
+def cfg_delete_target(values: list[str] | None) -> str | None:
+    if not values or values[0].lower() != "delete":
+        return None
+    if len(values) != 2:
+        raise SystemExit("--cfg delete expects a config name")
+    name = values[1].strip()
+    if not name:
+        raise SystemExit("--cfg delete expects a non-empty config name")
+    return name
+
+
+def get_named_config(config: dict[str, object], name: str) -> dict[str, object] | None:
+    value = configs_dict(config).get(name)
+    return value if isinstance(value, dict) else None
+
+
+def save_named_config(
+    config: dict[str, object],
+    name: str,
+    ascii_path: Path | None,
+    info_color: int | None,
+    data_color: int | None,
+) -> None:
+    name = name.strip()
+    if not name:
+        raise SystemExit("--cfg save expects a non-empty config name")
+
+    named: dict[str, object] = {}
+    if ascii_path is not None:
+        try:
+            named["ascii"] = str(ascii_path.resolve())
+        except OSError:
+            named["ascii"] = str(ascii_path)
+    if info_color is not None:
+        named["info_color"] = info_color
+    if data_color is not None:
+        named["data_color"] = data_color
+
+    configs = dict(configs_dict(config))
+    configs[name] = named
+    config["configs"] = configs
+    save_config(config)
+
+
+def delete_named_config(config: dict[str, object], name: str) -> int:
+    configs = dict(configs_dict(config))
+    if name not in configs:
+        print(f"Config not found: {name}", file=sys.stderr)
+        return 1
+    del configs[name]
+    config["configs"] = configs
+    save_config(config)
+    print(f"Deleted config: {name}")
+    return 0
 
 
 def configured_art_path(config: dict[str, object]) -> Path | None:
@@ -230,6 +383,27 @@ def configured_info_color(config: dict[str, object]) -> int | None:
     if isinstance(value, int) and 1 <= value <= len(PALETTE):
         return value
     return None
+
+
+def configured_data_color(config: dict[str, object]) -> int | None:
+    value = config.get("data_color")
+    if isinstance(value, int) and 1 <= value <= len(PALETTE):
+        return value
+    return None
+
+
+def parse_palette_color(values: list[str], option_name: str) -> int:
+    raw_value = " ".join(values).strip().lower().replace("-", " ").replace("_", " ")
+    raw_value = " ".join(raw_value.split())
+    if raw_value.isdigit():
+        index = int(raw_value)
+        if 1 <= index <= len(PALETTE):
+            return index
+    if raw_value in COLOR_NAMES:
+        return COLOR_NAMES[raw_value]
+    raise SystemExit(
+        f"{option_name} expects 1-{len(PALETTE)} or one of: {', '.join(sorted(COLOR_NAMES))}"
+    )
 
 
 def load_art(path: Path | None, color: bool) -> Art:
@@ -276,11 +450,13 @@ def default_art(color: bool) -> list[str]:
     return [f"{colors[index]}{line}{RESET}" for index, line in enumerate(lines)]
 
 
-def collect_stats(color: bool, info_color: int | None = None) -> list[str]:
+def collect_stats(color: bool, info_color: int | None = None, data_color: int | None = None) -> list[str]:
     username = getpass.getuser()
     hostname = socket.gethostname()
     label_sequence = palette_foreground(info_color) + BOLD if info_color is not None else CYAN + BOLD
+    data_sequence = palette_foreground(data_color) if data_color is not None else ""
     label = lambda text: colorize(f"{text:<10}", label_sequence, color)
+    value = lambda text: colorize(text, data_sequence, color) if data_sequence else text
     values = {
         "User": f"{username}@{hostname}",
         "OS": os_name(),
@@ -292,7 +468,7 @@ def collect_stats(color: bool, info_color: int | None = None) -> list[str]:
         "Shell": shell_name(),
         "Uptime": uptime(),
     }
-    stats = [f"{label(key)} {value}" for key, value in values.items() if value]
+    stats = [f"{label(key)} {value(raw_value)}" for key, raw_value in values.items() if raw_value]
     if color:
         stats.extend(["", *color_blocks()])
     return stats
@@ -340,8 +516,18 @@ def windows_cpu_name_from_registry() -> str:
 def gpu_name() -> str:
     if platform.system().lower() != "windows":
         return ""
-    output = run_command(["wmic", "path", "win32_VideoController", "get", "Name", "/value"])
-    names = [line.split("=", 1)[1].strip() for line in output.splitlines() if line.startswith("Name=")]
+    output = run_command(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+        ]
+    )
+    names = [line.strip() for line in output.splitlines() if line.strip()]
+    if not names:
+        output = run_command(["wmic", "path", "win32_VideoController", "get", "Name", "/value"])
+        names = [line.split("=", 1)[1].strip() for line in output.splitlines() if line.startswith("Name=")]
     return ", ".join(name for name in names if name)[:120]
 
 

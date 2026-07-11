@@ -48,23 +48,36 @@ def resolve_source_dir() -> tuple[Path, Path | None]:
 
 def download_latest_source() -> tuple[Path, Path]:
     temp_root = Path(tempfile.mkdtemp(prefix="winfetch-install-"))
-    zip_path = temp_root / "winfetch-main.zip"
-    extract_dir = temp_root / "repo"
+    try:
+        zip_path = temp_root / "winfetch-main.zip"
+        extract_dir = temp_root / "repo"
 
-    request = urllib.request.Request(
-        GITHUB_ZIP_URL,
-        headers={"User-Agent": "winfetch-installer"},
-    )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        zip_path.write_bytes(response.read())
+        request = urllib.request.Request(
+            GITHUB_ZIP_URL,
+            headers={"User-Agent": "winfetch-installer"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            zip_path.write_bytes(response.read())
 
-    with zipfile.ZipFile(zip_path) as archive:
-        archive.extractall(extract_dir)
+        with zipfile.ZipFile(zip_path) as archive:
+            safe_extract(archive, extract_dir)
 
-    matches = list(extract_dir.glob("*/src/winfetch"))
-    if not matches:
-        raise FileNotFoundError("Downloaded repo did not contain src/winfetch")
-    return matches[0], temp_root
+        matches = list(extract_dir.glob("*/src/winfetch"))
+        if not matches:
+            raise FileNotFoundError("Downloaded repo did not contain src/winfetch")
+        return matches[0], temp_root
+    except Exception:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+
+
+def safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if not target.is_relative_to(destination):
+            raise ValueError(f"Unsafe path in downloaded archive: {member.filename}")
+    archive.extractall(destination)
 
 
 def install(source_dir: Path) -> None:
@@ -74,10 +87,28 @@ def install(source_dir: Path) -> None:
     shim_dir = local_appdata / "Microsoft" / "WindowsApps"
     shim_path = shim_dir / f"{APP_NAME}.cmd"
 
-    if package_dir.exists():
-        shutil.rmtree(package_dir)
     install_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_dir, package_dir)
+    staging_root = Path(tempfile.mkdtemp(prefix=".winfetch-", dir=install_dir))
+    staging_package = staging_root / APP_NAME
+    backup_dir = install_dir / f".{APP_NAME}-previous"
+    installed = False
+    try:
+        shutil.copytree(source_dir, staging_package)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        if package_dir.exists():
+            package_dir.replace(backup_dir)
+        try:
+            staging_package.replace(package_dir)
+            installed = True
+        except Exception:
+            if backup_dir.exists():
+                backup_dir.replace(package_dir)
+            raise
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        if installed:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
     shim_dir.mkdir(parents=True, exist_ok=True)
     shim_path.write_text(
@@ -93,7 +124,7 @@ def install(source_dir: Path) -> None:
 def bundled_source_dir() -> Path:
     bundle_dir = getattr(sys, "_MEIPASS", None)
     if bundle_dir:
-        return Path(bundle_dir) / APP_NAME
+        return Path(bundle_dir) / "src" / APP_NAME
     return Path(__file__).resolve().parents[1] / "src" / APP_NAME
 
 
